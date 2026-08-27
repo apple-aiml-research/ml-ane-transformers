@@ -14,3 +14,9 @@ dist/
 # Test/cache artifacts
 .pytest_cache/
 .coverage
+
+# Local virtual environment
+bin/
+lib/
+share/
+pyvenv.cfg
