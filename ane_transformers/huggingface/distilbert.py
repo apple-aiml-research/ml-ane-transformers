@@ -51,7 +51,7 @@ class Embeddings(modeling_distilbert.Embeddings):
         setattr(self, 'LayerNorm', LayerNormANE(config.dim, eps=EPS))
 
 
-class MultiHeadSelfAttention(modeling_distilbert.MultiHeadSelfAttention):
+class MultiHeadSelfAttention(modeling_distilbert.DistilBertSelfAttention):
     """ MultiHeadSelfAttention module optimized for Apple Neural Engine
     """
 
@@ -93,7 +93,138 @@ class MultiHeadSelfAttention(modeling_distilbert.MultiHeadSelfAttention):
     def prune_heads(self, heads):
         raise NotImplementedError
 
-    def forward(self,
+    def forward(
+            self,
+            hidden_states,
+            attention_mask=None,
+            head_mask=None,
+            output_attentions=False,
+            **kwargs):
+        """
+        Transformers-compatible front end for the ANE attention kernel.
+
+        Supports both tensor layouts:
+
+            Hugging Face:
+                [B, S, D]
+
+            ANE optimized path:
+                [B, D, 1, S]
+        """
+
+        if hidden_states.dim() == 3:
+            # ------------------------------------------------
+            # HF layout:
+            #
+            # [B, S, D]
+            #
+            # Convert to ANE:
+            #
+            # [B, D, 1, S]
+            # ------------------------------------------------
+            query = hidden_states.permute(
+                0, 2, 1
+            ).unsqueeze(2)
+
+        elif hidden_states.dim() == 4:
+            # ------------------------------------------------
+            # Already ANE layout.
+            #
+            # [B, D, 1, S]
+            # ------------------------------------------------
+            query = hidden_states
+
+        else:
+            raise RuntimeError(
+                "Unexpected hidden_states rank: "
+                f"{hidden_states.dim()}, shape="
+                f"{list(hidden_states.shape)}"
+            )
+
+        # q/k/v are self-attention, so they use the same tensor.
+        key = query
+        value = query
+
+        # ----------------------------------------------------
+        # Normalize attention mask for the original ANE kernel.
+        # ----------------------------------------------------
+
+        mask = attention_mask
+
+        if mask is not None:
+
+            if mask.dim() == 2:
+                # [B, S]
+                mask = mask.unsqueeze(2).unsqueeze(3)
+
+            elif mask.dim() == 4:
+                # Already expanded.
+                pass
+
+            else:
+                raise RuntimeError(
+                    "Unexpected attention_mask shape: "
+                    f"{list(mask.shape)}"
+                )
+
+        if head_mask is not None:
+            raise NotImplementedError(
+                "head_mask is not supported by the ANE "
+                "attention implementation"
+            )
+
+        # ----------------------------------------------------
+        # Original ANE attention implementation.
+        # ----------------------------------------------------
+
+        result = self._ane_forward(
+            query,
+            key,
+            value,
+            mask,
+            head_mask=None,
+            output_attentions=output_attentions,
+        )
+
+        attn_output = result[0]
+        # ANE attention can return either a tensor or a tuple.
+        # Hugging Face expects (attention_output, attention_weights).
+        if isinstance(result, (tuple, list)):
+            attn_output = result[0]
+            attn_weights = result[1] if len(result) > 1 else None
+        else:
+            attn_output = result
+            attn_weights = None
+        # ----------------------------------------------------
+        # The original ANE implementation returns:
+        #
+        #     [B, D, 1, S]
+        #
+        # The surrounding ANE-optimized model expects that
+        # layout, so DO NOT blindly convert 4D output to HF.
+        #
+        # However, if the kernel returns [B,S,D], leave it
+        # alone.
+        # ----------------------------------------------------
+
+        if attn_output.dim() == 4:
+            if (
+                attn_output.shape[1] == self.dim
+                and attn_output.shape[2] == 1
+            ):
+                # Already ANE layout.
+                return attn_output, attn_weights
+
+        elif attn_output.dim() == 3:
+            # Normal HF layout.
+            return attn_output, attn_weights
+
+        raise RuntimeError(
+            "Unexpected attention output shape: "
+            f"{list(attn_output.shape)}"
+        )
+
+    def _ane_forward(self,
                 query,
                 key,
                 value,
@@ -125,23 +256,152 @@ class MultiHeadSelfAttention(modeling_distilbert.MultiHeadSelfAttention):
         k = self.k_lin(key)
         v = self.v_lin(value)
 
-        # Validate mask
-        if mask is not None:
-            expected_mask_shape = [bs, seqlen, 1, 1]
-            if mask.dtype == torch.bool:
-                mask = mask.logical_not().float() * -1e4
-            elif mask.dtype == torch.int64:
-                mask = (1 - mask).float() * -1e4
-            elif mask.dtype != torch.float32:
-                raise TypeError(f"Unexpected dtype for mask: {mask.dtype}")
+        # --------------------------------------------------------------
+        # Normalize Hugging Face attention masks for the legacy ANE kernel.
+        #
+        # The original ANE implementation expects:
+        #
+        #     [batch, sequence, 1, 1]
+        #
+        # Modern Transformers may provide:
+        #
+        #     [batch, sequence]
+        #     [batch, 1, 1, sequence]
+        #     [batch, 1, hidden, sequence]
+        #
+        # The last form is what the current Transformers stack is producing
+        # here: [2, 1, 768, 256].
+        #
+        # The 768 dimension is NOT the sequence dimension.  The sequence
+        # dimension is the final dimension (256).
+        # --------------------------------------------------------------
 
-            if len(mask.size()) == 2:
-                mask = mask.unsqueeze(2).unsqueeze(2)
+        if mask is not None:
+
+            mask = mask
+
+            if mask.dim() == 2:
+                # [B, S]
+                pass
+
+            elif mask.dim() == 4:
+                # Modern HF expanded mask.
+                #
+                # Examples:
+                #   [B, 1, 1, S]
+                #   [B, 1, H, S]
+                #
+                # In both cases the final dimension is the key sequence.
+                #
+                # Take the first query/head row. For the current DistilBERT
+                # path those rows contain the same key-position mask.
+                if mask.size(0) != bs:
+                    raise RuntimeError(
+                        "Attention mask batch dimension does not match "
+                        f"hidden states: mask={list(mask.size())}, batch={bs}"
+                    )
+
+                if mask.size(-1) != seqlen:
+                    raise RuntimeError(
+                        "Attention mask sequence dimension does not match "
+                        f"hidden states: mask={list(mask.size())}, "
+                        f"expected sequence={seqlen}"
+                    )
+
+                mask = mask[:, 0, 0, :]
+
+            elif mask.dim() == 3:
+                # Be permissive with [B, 1, S] or [B, S, 1].
+                if mask.size(0) != bs:
+                    raise RuntimeError(
+                        "Attention mask batch dimension does not match "
+                        f"hidden states: mask={list(mask.size())}, batch={bs}"
+                    )
+
+                if mask.size(-1) == seqlen:
+                    mask = mask[:, 0, :]
+                elif mask.size(1) == seqlen:
+                    mask = mask[:, :, 0]
+                else:
+                    raise RuntimeError(
+                        "Unsupported 3-D attention mask shape: "
+                        f"{list(mask.size())}; expected sequence={seqlen}"
+                    )
+
+            else:
+                raise RuntimeError(
+                    "Unsupported attention mask rank: "
+                    f"{mask.dim()}, shape={list(mask.size())}"
+                )
+
+            # At this point mask should be [B, S].
+            if list(mask.size()) != [bs, seqlen]:
+                raise RuntimeError(
+                    "Failed to normalize attention mask: "
+                    f"got {list(mask.size())}, expected {[bs, seqlen]}"
+                )
+
+            # Normalize dtype/semantics.
+            #
+            # Boolean:
+            #   True  = token is valid
+            #   False = token is padding
+            #
+            # Integer 0/1:
+            #   1 = valid
+            #   0 = padding
+            #
+            # Floating-point masks can already be additive masks
+            # (0 for valid, negative value for masked), which should
+            # be preserved.
+            if mask.dtype == torch.bool:
+                mask = mask.logical_not().to(dtype=torch.float32) * -1e4
+
+            elif mask.dtype in (
+                torch.int8,
+                torch.uint8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+            ):
+                mask = (1 - mask.to(dtype=torch.float32)) * -1e4
+
+            elif not mask.is_floating_point():
+                raise TypeError(
+                    f"Unexpected dtype for mask: {mask.dtype}"
+                )
+
+            else:
+                mask = mask.to(dtype=torch.float32)
+
+                # If this is a normal binary floating-point mask,
+                # convert 0/1 -> additive 0/-1e4.
+                #
+                # If it is already an additive mask containing negative
+                # values, leave it alone.
+                if bool(torch.all((mask == 0) | (mask == 1)).item()):
+                    mask = (1 - mask) * -1e4
+
+            # Legacy ANE layout:
+            #
+            # [B, S] -> [B, S, 1, 1]
+            mask = mask.unsqueeze(2).unsqueeze(3)
+
+            expected_mask_shape = [bs, seqlen, 1, 1]
 
             if list(mask.size()) != expected_mask_shape:
                 raise RuntimeError(
-                    f"Invalid shape for `mask` (Expected {expected_mask_shape}, got {list(mask.size())}"
+                    "Invalid normalized mask shape "
+                    f"(Expected {expected_mask_shape}, "
+                    f"got {list(mask.size())})"
                 )
+
+            # The rest of the original ANE kernel expects the variable
+            # to be named `mask`.
+            # Keep the normalized mask in the variable expected by the original ANE kernel.
+
+        else:
+            mask = None
 
         if head_mask is not None:
             raise NotImplementedError

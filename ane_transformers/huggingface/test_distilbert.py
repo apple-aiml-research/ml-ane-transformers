@@ -16,7 +16,7 @@ import torch
 torch.set_grad_enabled(False)
 
 import transformers
-import distilbert as ane_transformers
+from ane_transformers.huggingface import distilbert as ane_transformers
 
 logger = logging.getLogger(__name__)
 logger.setLevel('INFO')
@@ -51,7 +51,6 @@ class TestDistilBertForSequenceClassification(unittest.TestCase):
                 transformers.AutoModelForSequenceClassification.from_pretrained(
                     SEQUENCE_CLASSIFICATION_MODEL,
                     return_dict=False,
-                    torchscript=True,
                 ).eval()
             }
         except Exception as e:
@@ -62,7 +61,16 @@ class TestDistilBertForSequenceClassification(unittest.TestCase):
         cls.models[
             'test'] = ane_transformers.DistilBertForSequenceClassification(
                 cls.models['ref'].config).eval()
-        cls.models['test'].load_state_dict(cls.models['ref'].state_dict())
+        state_dict = cls.models['ref'].state_dict()
+
+        # The ANE implementation uses 1x1 Conv2d projections where
+        # Hugging Face uses Linear layers. Reshape the checkpoint weights
+        # so the trained values are preserved exactly.
+        for name in ['pre_classifier.weight', 'classifier.weight']:
+            if name in state_dict:
+                state_dict[name] = state_dict[name].unsqueeze(-1).unsqueeze(-1)
+
+        cls.models['test'].load_state_dict(state_dict)
         logger.info("Initialized and restored test model")
 
         # Cache tokenized inputs and forward pass results on both the reference and test networks
@@ -128,10 +136,15 @@ class TestDistilBertForSequenceClassification(unittest.TestCase):
                 convert_to='mlprogram',
                 inputs=[
                     ct.TensorType(
-                        f"input_{name}",
-                        shape=tensor.shape,
+                        "input_input_ids",
+                        shape=self.inputs["input_ids"].shape,
                         dtype=np.int32,
-                    ) for name, tensor in self.inputs.items()
+                    ),
+                    ct.TensorType(
+                        "input_attention_mask",
+                        shape=self.inputs["attention_mask"].shape,
+                        dtype=np.int32,
+                    ),
                 ],
                 compute_units=ct.ComputeUnit.ALL,
             )
@@ -147,10 +160,15 @@ class TestDistilBertForSequenceClassification(unittest.TestCase):
                 convert_to='mlprogram',
                 inputs=[
                     ct.TensorType(
-                        f"input_{name}",
-                        shape=tensor.shape,
+                        "input_input_ids",
+                        shape=self.inputs["input_ids"].shape,
                         dtype=np.int32,
-                    ) for name, tensor in self.inputs.items()
+                    ),
+                    ct.TensorType(
+                        "input_attention_mask",
+                        shape=self.inputs["attention_mask"].shape,
+                        dtype=np.int32,
+                    ),
                 ],
                 compute_units=ct.ComputeUnit.CPU_AND_GPU,
             )
