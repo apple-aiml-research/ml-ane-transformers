@@ -1,2 +1,16 @@
-# Created by venv; see https://docs.python.org/3/library/venv.html
-*
+# Python virtual environments
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Test/cache artifacts
+.pytest_cache/
+.coverage
