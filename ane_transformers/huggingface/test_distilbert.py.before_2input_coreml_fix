@@ -136,15 +136,10 @@ class TestDistilBertForSequenceClassification(unittest.TestCase):
                 convert_to='mlprogram',
                 inputs=[
                     ct.TensorType(
-                        "input_input_ids",
-                        shape=self.inputs["input_ids"].shape,
+                        f"input_{name}",
+                        shape=tensor.shape,
                         dtype=np.int32,
-                    ),
-                    ct.TensorType(
-                        "input_attention_mask",
-                        shape=self.inputs["attention_mask"].shape,
-                        dtype=np.int32,
-                    ),
+                    ) for name, tensor in self.inputs.items()
                 ],
                 compute_units=ct.ComputeUnit.ALL,
             )
@@ -160,15 +155,10 @@ class TestDistilBertForSequenceClassification(unittest.TestCase):
                 convert_to='mlprogram',
                 inputs=[
                     ct.TensorType(
-                        "input_input_ids",
-                        shape=self.inputs["input_ids"].shape,
+                        f"input_{name}",
+                        shape=tensor.shape,
                         dtype=np.int32,
-                    ),
-                    ct.TensorType(
-                        "input_attention_mask",
-                        shape=self.inputs["attention_mask"].shape,
-                        dtype=np.int32,
-                    ),
+                    ) for name, tensor in self.inputs.items()
                 ],
                 compute_units=ct.ComputeUnit.CPU_AND_GPU,
             )

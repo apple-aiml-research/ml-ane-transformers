@@ -1,5 +1,22 @@
-*.json
-*.DS_Store
-*.pyc
-*.egg-info
-dist
+# Python virtual environments
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Test/cache artifacts
+.pytest_cache/
+.coverage
+
+# Local virtual environment
+bin/
+lib/
+share/
+pyvenv.cfg
