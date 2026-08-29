@@ -1,0 +1,16 @@
+# Run with: ./abs tools/ane_check.abs
+f project_check(){
+  {
+    'platform': `uname -s`,
+    'architecture': `uname -m`,
+    'branch': `git branch --show-current`,
+    'commit': `git log -1 --oneline`,
+    'ane_transformers': `test -d ane_transformers && echo present || echo missing`,
+    'coreml_diagnostics': `test -f diagnose_coreml_inputs.py && echo present || echo missing`,
+    'distilbert_test': `test -f test_distilbert_coreml.py && echo present || echo missing`,
+    'makefile': `test -f Makefile && echo present || echo missing`,
+    'python3': `command -v python3 >/dev/null && echo present || echo missing`
+  }
+}
+
+echo(project_check())
